@@ -632,7 +632,14 @@ function dayName(d) { return ['CN','T2','T3','T4','T5','T6','T7'][d]; }
 function fmtDate(dt) {
   return `${String(dt.getDate()).padStart(2,'0')}/${String(dt.getMonth()+1).padStart(2,'0')}`;
 }
-function fmtKey(dt) { return dt.toISOString().slice(0,10); }
+function fmtKey(dt) {
+  // Dùng giờ ĐỊA PHƯƠNG (không phải toISOString() vốn quy về UTC), vì UTC+7 của VN
+  // sẽ làm lệch ngày khi convert nếu dùng toISOString() trực tiếp.
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth()+1).padStart(2,'0');
+  const d = String(dt.getDate()).padStart(2,'0');
+  return `${y}-${m}-${d}`;
+}
 function getPeriodKey() {
   return `${document.getElementById('selYear').value}-${document.getElementById('selMonth').value}`;
 }
@@ -903,8 +910,10 @@ function confirmDeleteClass(name) {
   delete state.attendance[name];
   saveState();
   renderDashboard();
-  scheduleDirectoryFlush();
-  deleteClassOnSheet(name);
+  // Xoá là thao tác quan trọng: gửi ngay (không debounce) và track để loadFromSheet
+  // không "hồi sinh" dữ liệu vừa xoá nếu người dùng bấm đồng bộ ngay sau đó.
+  trackFlush(flushDirectoryToSheet());
+  trackFlush(deleteClassOnSheet(name));
   showToast(`🗑 Đã xoá lớp "${name}"`);
 }
 
@@ -914,7 +923,10 @@ function resetClassAttendance() {
   delete state.attendance[cls];
   saveState();
   renderTable();
-  scheduleFlush(cls, getPeriodKey());
+  // Xoá điểm danh là thao tác quan trọng: gửi ngay, track để tránh bị "hồi sinh"
+  // nếu người dùng đồng bộ lại trước khi debounce thường kịp gửi.
+  clearTimeout(flushTimer);
+  trackFlush(flushToSheet(cls, getPeriodKey()));
   showToast(`✅ Đã xoá điểm danh lớp "${cls}"`);
 }
 
@@ -964,7 +976,12 @@ function removeStudent(idx) {
   saveState();
   renderStudentList();
   renderTable();
-  scheduleDirectoryFlush();
+  // Xoá học sinh là thao tác quan trọng: gửi ngay, track để tránh "hồi sinh" do merge OR.
+  clearTimeout(dirFlushTimer);
+  trackFlush(flushDirectoryToSheet());
+  // Cũng cần ghi lại period hiện tại để Sheet xoá đúng cột điểm danh của học sinh đó
+  clearTimeout(flushTimer);
+  trackFlush(flushToSheet(cls, getPeriodKey()));
 }
 
 // ===== EXPORT EXCEL =====
@@ -1026,45 +1043,78 @@ function updateSyncBadge(status) {
 }
 
 // ===== SYNC: tải dữ liệu từ Sheet khi mở trang =====
-// Google Sheet là NGUỒN CHÍNH (source of truth). Mỗi lần gọi, dữ liệu từ Sheet
-// sẽ ghi đè lên local/localStorage để mọi máy đều thấy data mới nhất.
+// LOCAL LÀ NGUỒN CHÍNH XÁC. Google Sheet chỉ dùng để CHIA SẺ dữ liệu giữa các máy —
+// không bao giờ xoá hay đè mất những gì local đang có.
+// Cách merge: với mỗi ô điểm danh, kết quả = (local nói có) HOẶC (Sheet nói có).
+// Tức là 1 ô chỉ cần 1 trong 2 nguồn báo "đã điểm danh" thì kết quả là đã điểm danh.
+// Việc BỎ tick (set false) chỉ có hiệu lực cục bộ trên máy đó cho tới khi nó tự
+// đồng bộ lại — máy khác không thể làm "biến mất" 1 lượt điểm danh đã ghi.
 //
 // QUAN TRỌNG: phải đợi mọi lượt flush (ghi lên Sheet) đang chạy hoàn tất TRƯỚC KHI
-// gọi GET, nếu không sẽ xảy ra race condition: GET chạy xong trước khi POST kịp lưu,
-// trả về data cũ, rồi ghi đè mất luôn check-in vừa tick (mặc dù POST sau đó vẫn lưu
-// thành công lên Sheet — chỉ là local đã bị overwrite về bản cũ trước đó).
+// gọi GET, để đảm bảo merge dựa trên dữ liệu Sheet mới nhất có thể.
 async function loadFromSheet(showSpinnerToast) {
   if (!isSyncEnabled()) return;
   try {
     updateSyncBadge('syncing');
-    if (showSpinnerToast) showToast('🔄 Đang tải dữ liệu từ Google Sheet...');
+    if (showSpinnerToast) showToast('🔄 Đang đồng bộ với Google Sheet...');
     await waitForPendingFlushes();
     const res = await fetch(`${SHEET_API_URL}?action=getAll`);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
 
-    if (data.classes && Object.keys(data.classes).length > 0) {
-      // Sheet thắng tuyệt đối cho danh sách lớp + học sinh
-      const newClasses = data.classes;
-      const newMeta = {};
-      Object.keys(newClasses).forEach(n => {
-        // Giữ lại lịch học (days/time) cũ nếu đã cấu hình, vì Sheet không lưu info này
-        newMeta[n] = state.classesMeta[n] || { days: [1,3,5], time: '' };
+    let addedNewClass = false;
+    let addedNewCheckin = false;
+
+    if (data.classes) {
+      // Lớp/học sinh: BỔ SUNG những lớp/học sinh Sheet có mà local chưa có.
+      // Không xoá lớp/học sinh local đang có dù Sheet không thấy (có thể do máy
+      // khác xoá nhưng máy này chưa đồng bộ lượt xoá đó, hoặc do thứ tự ghi).
+      Object.keys(data.classes).forEach(cls => {
+        if (!state.classes[cls]) {
+          state.classes[cls] = [];
+          state.classesMeta[cls] = state.classesMeta[cls] || { days: [1,3,5], time: '' };
+          addedNewClass = true;
+        }
+        (data.classes[cls] || []).forEach(name => {
+          if (!state.classes[cls].includes(name)) {
+            state.classes[cls].push(name);
+            addedNewClass = true;
+          }
+        });
       });
-      state.classes = newClasses;
-      state.classesMeta = newMeta;
     }
 
     if (data.attendance) {
-      // Sheet thắng tuyệt đối cho điểm danh: ghi đè toàn bộ
-      state.attendance = data.attendance;
+      // Điểm danh: merge kiểu OR theo từng ô (class -> period -> name -> date)
+      Object.keys(data.attendance).forEach(cls => {
+        if (!state.attendance[cls]) state.attendance[cls] = {};
+        Object.keys(data.attendance[cls]).forEach(pk => {
+          if (!state.attendance[cls][pk]) state.attendance[cls][pk] = {};
+          Object.keys(data.attendance[cls][pk]).forEach(name => {
+            if (!state.attendance[cls][pk][name]) state.attendance[cls][pk][name] = {};
+            Object.keys(data.attendance[cls][pk][name]).forEach(dateKey => {
+              const sheetVal = !!data.attendance[cls][pk][name][dateKey];
+              const localVal = !!state.attendance[cls][pk][name][dateKey];
+              if (sheetVal && !localVal) addedNewCheckin = true;
+              // OR: chỉ cần 1 trong 2 nguồn báo true thì kết quả là true
+              state.attendance[cls][pk][name][dateKey] = localVal || sheetVal;
+            });
+          });
+        });
+      });
     }
 
     saveState();
     rebuild();
     if (state.activeClass) renderTable();
     updateSyncBadge('ok');
-    if (showSpinnerToast) showToast('✅ Đã đồng bộ dữ liệu mới nhất!');
+    if (showSpinnerToast) {
+      if (addedNewClass || addedNewCheckin) {
+        showToast('✅ Đã cập nhật dữ liệu mới từ máy khác!');
+      } else {
+        showToast('✅ Dữ liệu đã đồng bộ, không có gì mới');
+      }
+    }
   } catch (err) {
     console.error('Lỗi tải dữ liệu từ Sheet:', err);
     updateSyncBadge('error');
