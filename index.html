@@ -522,9 +522,24 @@ function addStudent() {
 function removeStudent(idx) {
   const cls = state.activeClass;
   const name = state.classes[cls][idx];
-  if (!confirm(`Xoá học sinh "${name}"?`)) return;
+  if (!confirm(`Xoá học sinh "${name}"? Dữ liệu điểm danh của học sinh này cũng sẽ bị xoá.`)) return;
   state.classes[cls].splice(idx, 1);
-  // Xoá dữ liệu điểm danh của học sinh này (dịch chuyển index)
+
+  // Dịch lại index điểm danh cho đúng (vì các học sinh sau bị lùi 1 vị trí)
+  if (state.attendance[cls]) {
+    Object.keys(state.attendance[cls]).forEach(periodKey => {
+      const oldData = state.attendance[cls][periodKey];
+      const newData = {};
+      Object.keys(oldData).forEach(key => {
+        const i = parseInt(key);
+        if (i < idx) newData[i] = oldData[key];
+        else if (i > idx) newData[i - 1] = oldData[key];
+        // i === idx -> bị xoá, không copy nữa
+      });
+      state.attendance[cls][periodKey] = newData;
+    });
+  }
+
   saveState();
   renderStudentList();
   renderTable();
