@@ -548,19 +548,18 @@ const CARD_COLORS = [
   { accent: '#ed64a6', bg: 'rgba(237,100,166,0.15)', icon: '🚀' },
 ];
 
-// Cấu trúc lớp: name, days (số nguyên: 0=CN,1=T2..6=T7), time
 const DEFAULT_CLASSES_META = [
-  { name: "Lớp 1A", days: [1,3,5], time: "",        students: ["Thịnh","Từ Minh Quân","Thiên Khôi","Tiger (Minh Trí)","Thiên Thư","Minh Triết","Thiên Trí","Khánh Linh","Thiên Quang"] },
-  { name: "Lớp 1",  days: [2,4,6], time: "9h-11h",  students: [] },
-  { name: "Lớp 2",  days: [2,4,6], time: "",         students: [] },
-  { name: "Lớp 3",  days: [1,3,5], time: "",         students: ["Hoàng Khang","Thanh Hà","YSENNY","Jenny","Thiên Kỳ","Quỳnh Như","Triều Phong","Thúy Kiều","Yến My"] },
-  { name: "Lớp 4",  days: [2,3,4], time: "",         students: [] },
+  { name: "Lớp 1A", days: [1,3,5], time: "", students: ["Thịnh","Thiên Khôi","Tiger (Minh Trí)","Thiên Thư","Minh Triết","Thiên Trí","Khánh Linh","Thiên Quang"] },
+  { name: "Lớp 1", days: [2,4,6], time: "9h-11h", students: ["Minh Quân","Họa My","Tiến Thành","Thanh Tuyền","Đức Nhân","Văn Nam","Thiên Quang"] },
+  { name: "Lớp 2", days: [2,4,6], time: "", students: ["Gia Khang","Linh Đa","Bảo Nguyên","Trà My","Kim Yên","Yumi","Thiên Trí","Duy Hải","Bảo Như"] },
+  { name: "Lớp 3", days: [1,3,5], time: "", students: ["Hoàng Khang","Thanh Hà","YSENNY","Jenny","Thiên Kỳ","Quỳnh Như","Triều Phong","Thúy Kiều","Yến My"] },
+  { name: "Lớp 4", days: [2,3,4], time: "", students: ["Hải Danh","Thanh Bình"] },
 ];
 
 // ===== STATE =====
 let state = {
-  classesMeta: {}, // { name: { days, time } }
-  classes: {},     // { name: [students] }
+  classesMeta: {},
+  classes: {},
   attendance: {},
   activeClass: null,
   days: [],
@@ -578,14 +577,12 @@ function loadState() {
       state.classesMeta = p.classesMeta || {};
       state.classes = p.classes || {};
       state.attendance = p.attendance || {};
-      // migrate nếu chưa có meta
       Object.keys(state.classes).forEach(n => {
         if (!state.classesMeta[n]) {
           state.classesMeta[n] = { days: [1,3,5], time: '' };
         }
       });
     } else {
-      // seed defaults
       DEFAULT_CLASSES_META.forEach(c => {
         state.classesMeta[c.name] = { days: c.days, time: c.time };
         state.classes[c.name] = [...c.students];
@@ -604,7 +601,6 @@ function saveState() {
   } catch(e) {}
 }
 function migrateOldFormat() {
-  // migrate old numeric keys to name-based
   Object.keys(state.attendance).forEach(cls => {
     const students = state.classes[cls] || [];
     Object.keys(state.attendance[cls] || {}).forEach(pk => {
@@ -633,8 +629,6 @@ function fmtDate(dt) {
   return `${String(dt.getDate()).padStart(2,'0')}/${String(dt.getMonth()+1).padStart(2,'0')}`;
 }
 function fmtKey(dt) {
-  // Dùng giờ ĐỊA PHƯƠNG (không phải toISOString() vốn quy về UTC), vì UTC+7 của VN
-  // sẽ làm lệch ngày khi convert nếu dùng toISOString() trực tiếp.
   const y = dt.getFullYear();
   const m = String(dt.getMonth()+1).padStart(2,'0');
   const d = String(dt.getDate()).padStart(2,'0');
@@ -759,7 +753,6 @@ function renderDashboard() {
     grid.appendChild(card);
   });
 
-  // Add card
   const addCard = document.createElement('div');
   addCard.className = 'class-card add-card';
   addCard.innerHTML = `<div class="plus">+</div><span>Thêm lớp mới</span>`;
@@ -782,7 +775,6 @@ async function openClass(name) {
   document.getElementById('detailView').style.display = 'block';
   updateSyncBadge();
   renderTable();
-  // Tải lại dữ liệu mới nhất từ Sheet (Sheet là nguồn chính) cho riêng lớp này
   await loadFromSheet();
   if (state.activeClass === name) renderTable();
 }
@@ -806,7 +798,6 @@ function renderTable() {
     <div class="info-chip">💰 <strong>${gia.toLocaleString('vi-VN')}đ</strong>/buổi</div>
   `;
 
-  // Header
   const thead = document.getElementById('thead');
   let hRow = `<tr>
     <th>#</th>
@@ -910,8 +901,6 @@ function confirmDeleteClass(name) {
   delete state.attendance[name];
   saveState();
   renderDashboard();
-  // Xoá là thao tác quan trọng: gửi ngay (không debounce) và track để loadFromSheet
-  // không "hồi sinh" dữ liệu vừa xoá nếu người dùng bấm đồng bộ ngay sau đó.
   trackFlush(flushDirectoryToSheet());
   trackFlush(deleteClassOnSheet(name));
   showToast(`🗑 Đã xoá lớp "${name}"`);
@@ -923,10 +912,9 @@ function resetClassAttendance() {
   delete state.attendance[cls];
   saveState();
   renderTable();
-  // Xoá điểm danh là thao tác quan trọng: gửi ngay, track để tránh bị "hồi sinh"
-  // nếu người dùng đồng bộ lại trước khi debounce thường kịp gửi.
   clearTimeout(flushTimer);
-  trackFlush(flushToSheet(cls, getPeriodKey()));
+  // Đưa thẳng vào hàng đợi, không qua debounce
+  enqueueFlush(cls, getPeriodKey());
   showToast(`✅ Đã xoá điểm danh lớp "${cls}"`);
 }
 
@@ -976,12 +964,10 @@ function removeStudent(idx) {
   saveState();
   renderStudentList();
   renderTable();
-  // Xoá học sinh là thao tác quan trọng: gửi ngay, track để tránh "hồi sinh" do merge OR.
   clearTimeout(dirFlushTimer);
   trackFlush(flushDirectoryToSheet());
-  // Cũng cần ghi lại period hiện tại để Sheet xoá đúng cột điểm danh của học sinh đó
   clearTimeout(flushTimer);
-  trackFlush(flushToSheet(cls, getPeriodKey()));
+  enqueueFlush(cls, getPeriodKey());
 }
 
 // ===== EXPORT EXCEL =====
@@ -1017,12 +1003,92 @@ function exportExcel() {
   showToast('✅ Đã xuất Excel!');
 }
 
-// ===== SYNC: helpers chung =====
+// ===================================================================
+// ===== SYNC – SERIAL QUEUE PER (CLASS, PERIOD) ======================
+// ===================================================================
+//
+// Vấn đề cũ: nhiều lượt tick nhanh → debounce cancel lẫn nhau nhưng
+// đôi khi vẫn để 2 fetch của cùng (cls, pk) bay song song → race condition.
+//
+// Giải pháp: mỗi cặp (cls, pk) có 1 hàng đợi riêng gồm 2 phần:
+//   - debounceTimer : gộp các lượt thay đổi liên tiếp thành 1 lần gửi
+//   - running       : promise của request đang chạy (nếu có)
+//   - pending       : true/false — có yêu cầu gửi đang chờ running xong không
+//
+// Cơ chế:
+//  1. scheduleFlush(cls,pk) set debounceTimer 300 ms.
+//  2. Khi timer cháy → enqueueFlush(cls,pk).
+//  3. enqueueFlush: nếu đang chạy → chỉ đánh dấu pending=true rồi thoát.
+//     Khi running xong → tự kiểm tra pending, nếu còn → gửi tiếp 1 lần nữa.
+//  4. Kết quả: không bao giờ có 2 fetch của cùng (cls,pk) song song;
+//     dữ liệu mới nhất luôn được gửi sau khi request trước hoàn tất.
+// ===================================================================
+
+// Map<string, { debounceTimer, running: Promise|null, pending: bool }>
+const _queues = new Map();
+
+function _getQueue(key) {
+  if (!_queues.has(key)) {
+    _queues.set(key, { debounceTimer: null, running: null, pending: false });
+  }
+  return _queues.get(key);
+}
+
+/** Debounce 300ms rồi đưa vào hàng đợi tuần tự. */
+function scheduleFlush(cls, pk) {
+  if (!isSyncEnabled()) return;
+  const q = _getQueue(`${cls}||${pk}`);
+  clearTimeout(q.debounceTimer);
+  q.debounceTimer = setTimeout(() => enqueueFlush(cls, pk), 300);
+}
+
+/** Đưa 1 lượt flush vào hàng đợi; không chạy song song cùng (cls, pk). */
+function enqueueFlush(cls, pk) {
+  if (!isSyncEnabled()) return;
+  const key = `${cls}||${pk}`;
+  const q = _getQueue(key);
+
+  if (q.running) {
+    // Đã có request đang chạy → chỉ đánh dấu "cần gửi thêm lần nữa"
+    q.pending = true;
+    return;
+  }
+
+  // Không có gì đang chạy → bắt đầu ngay
+  _startFlush(cls, pk);
+}
+
+function _startFlush(cls, pk) {
+  const key = `${cls}||${pk}`;
+  const q = _getQueue(key);
+  q.pending = false;
+
+  const promise = flushToSheet(cls, pk).then(
+    () => _onFlushDone(cls, pk),
+    () => _onFlushDone(cls, pk)   // lỗi cũng giải phóng queue
+  );
+  q.running = promise;
+  trackFlush(promise);
+}
+
+function _onFlushDone(cls, pk) {
+  const key = `${cls}||${pk}`;
+  const q = _getQueue(key);
+  q.running = null;
+  if (q.pending) {
+    // Trong khi đang gửi có thêm thay đổi → gửi lại 1 lần nữa
+    _startFlush(cls, pk);
+  }
+}
+
+// ===================================================================
+// ===== SYNC – CÁC HÀM GỐC (không đổi logic) =======================
+// ===================================================================
+
 function isSyncEnabled() {
   return !!(SHEET_API_URL && SHEET_API_URL.trim());
 }
 function updateSyncBadge(status) {
-  // status: undefined (idle dựa theo config) | 'syncing' | 'ok' | 'error'
   const el = document.getElementById('syncStatus');
   if (!el) return;
   if (!isSyncEnabled()) {
@@ -1042,16 +1108,6 @@ function updateSyncBadge(status) {
   }
 }
 
-// ===== SYNC: tải dữ liệu từ Sheet khi mở trang =====
-// LOCAL LÀ NGUỒN CHÍNH XÁC. Google Sheet chỉ dùng để CHIA SẺ dữ liệu giữa các máy —
-// không bao giờ xoá hay đè mất những gì local đang có.
-// Cách merge: với mỗi ô điểm danh, kết quả = (local nói có) HOẶC (Sheet nói có).
-// Tức là 1 ô chỉ cần 1 trong 2 nguồn báo "đã điểm danh" thì kết quả là đã điểm danh.
-// Việc BỎ tick (set false) chỉ có hiệu lực cục bộ trên máy đó cho tới khi nó tự
-// đồng bộ lại — máy khác không thể làm "biến mất" 1 lượt điểm danh đã ghi.
-//
-// QUAN TRỌNG: phải đợi mọi lượt flush (ghi lên Sheet) đang chạy hoàn tất TRƯỚC KHI
-// gọi GET, để đảm bảo merge dựa trên dữ liệu Sheet mới nhất có thể.
 async function loadFromSheet(showSpinnerToast) {
   if (!isSyncEnabled()) return;
   try {
@@ -1066,9 +1122,6 @@ async function loadFromSheet(showSpinnerToast) {
     let addedNewCheckin = false;
 
     if (data.classes) {
-      // Lớp/học sinh: BỔ SUNG những lớp/học sinh Sheet có mà local chưa có.
-      // Không xoá lớp/học sinh local đang có dù Sheet không thấy (có thể do máy
-      // khác xoá nhưng máy này chưa đồng bộ lượt xoá đó, hoặc do thứ tự ghi).
       Object.keys(data.classes).forEach(cls => {
         if (!state.classes[cls]) {
           state.classes[cls] = [];
@@ -1085,7 +1138,6 @@ async function loadFromSheet(showSpinnerToast) {
     }
 
     if (data.attendance) {
-      // Điểm danh: merge kiểu OR theo từng ô (class -> period -> name -> date)
       Object.keys(data.attendance).forEach(cls => {
         if (!state.attendance[cls]) state.attendance[cls] = {};
         Object.keys(data.attendance[cls]).forEach(pk => {
@@ -1096,7 +1148,6 @@ async function loadFromSheet(showSpinnerToast) {
               const sheetVal = !!data.attendance[cls][pk][name][dateKey];
               const localVal = !!state.attendance[cls][pk][name][dateKey];
               if (sheetVal && !localVal) addedNewCheckin = true;
-              // OR: chỉ cần 1 trong 2 nguồn báo true thì kết quả là true
               state.attendance[cls][pk][name][dateKey] = localVal || sheetVal;
             });
           });
@@ -1122,8 +1173,6 @@ async function loadFromSheet(showSpinnerToast) {
   }
 }
 
-// Đợi tất cả các promise flush (saveClassPeriod / saveDirectory / deleteClass) đang
-// chạy hoàn tất. Dùng mảng pendingFlushPromises, mỗi promise tự gỡ mình ra khi xong.
 let pendingFlushPromises = [];
 function trackFlush(promise) {
   pendingFlushPromises.push(promise);
@@ -1139,16 +1188,6 @@ async function waitForPendingFlushes() {
   }
 }
 
-// ===== SYNC: gửi điểm danh của 1 lớp/kỳ lên Sheet =====
-// Check-in cần phản hồi tức thì với người dùng, nhưng việc LƯU lên Sheet phải
-// chạy ngay (không debounce dài) và được track để loadFromSheet biết cần chờ.
-// Vẫn giữ debounce ngắn (300ms) để gộp nhiều lượt tick liên tiếp thành 1 request,
-// nhưng không debounce dài 800ms như trước (quá đủ thời gian để user bấm quay lại).
-function scheduleFlush(cls, pk) {
-  if (!isSyncEnabled()) return;
-  clearTimeout(flushTimer);
-  flushTimer = setTimeout(() => trackFlush(flushToSheet(cls, pk)), 300);
-}
 async function flushToSheet(cls, pk) {
   if (!isSyncEnabled()) return;
   try {
@@ -1175,8 +1214,6 @@ async function flushToSheet(cls, pk) {
   }
 }
 
-
-// ===== SYNC: gửi danh sách lớp/học sinh lên Sheet =====
 function scheduleDirectoryFlush() {
   if (!isSyncEnabled()) return;
   clearTimeout(dirFlushTimer);
@@ -1203,7 +1240,6 @@ async function flushDirectoryToSheet() {
   }
 }
 
-// ===== SYNC: xoá lớp trên Sheet =====
 async function deleteClassOnSheet(className) {
   if (!isSyncEnabled()) return;
   return trackFlush((async () => {
@@ -1239,8 +1275,6 @@ function showToast(msg) {
 }
 
 // ===== CẢNH BÁO KHI RỜI TRANG LÚC CHƯA LƯU XONG =====
-// Nếu vẫn còn request đang gửi lên Sheet (chưa kịp lưu), cảnh báo trước khi
-// đóng tab/refresh để tránh tưởng đã lưu nhưng thực ra request bị hủy giữa đường.
 window.addEventListener('beforeunload', e => {
   if (pendingFlushPromises.length > 0) {
     e.preventDefault();
