@@ -1028,11 +1028,17 @@ function updateSyncBadge(status) {
 // ===== SYNC: tải dữ liệu từ Sheet khi mở trang =====
 // Google Sheet là NGUỒN CHÍNH (source of truth). Mỗi lần gọi, dữ liệu từ Sheet
 // sẽ ghi đè lên local/localStorage để mọi máy đều thấy data mới nhất.
+//
+// QUAN TRỌNG: phải đợi mọi lượt flush (ghi lên Sheet) đang chạy hoàn tất TRƯỚC KHI
+// gọi GET, nếu không sẽ xảy ra race condition: GET chạy xong trước khi POST kịp lưu,
+// trả về data cũ, rồi ghi đè mất luôn check-in vừa tick (mặc dù POST sau đó vẫn lưu
+// thành công lên Sheet — chỉ là local đã bị overwrite về bản cũ trước đó).
 async function loadFromSheet(showSpinnerToast) {
   if (!isSyncEnabled()) return;
   try {
     updateSyncBadge('syncing');
     if (showSpinnerToast) showToast('🔄 Đang tải dữ liệu từ Google Sheet...');
+    await waitForPendingFlushes();
     const res = await fetch(`${SHEET_API_URL}?action=getAll`);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
@@ -1066,11 +1072,32 @@ async function loadFromSheet(showSpinnerToast) {
   }
 }
 
+// Đợi tất cả các promise flush (saveClassPeriod / saveDirectory / deleteClass) đang
+// chạy hoàn tất. Dùng mảng pendingFlushPromises, mỗi promise tự gỡ mình ra khi xong.
+let pendingFlushPromises = [];
+function trackFlush(promise) {
+  pendingFlushPromises.push(promise);
+  const cleanup = () => {
+    pendingFlushPromises = pendingFlushPromises.filter(p => p !== promise);
+  };
+  promise.then(cleanup, cleanup);
+  return promise;
+}
+async function waitForPendingFlushes() {
+  while (pendingFlushPromises.length > 0) {
+    await Promise.allSettled(pendingFlushPromises);
+  }
+}
+
 // ===== SYNC: gửi điểm danh của 1 lớp/kỳ lên Sheet =====
+// Check-in cần phản hồi tức thì với người dùng, nhưng việc LƯU lên Sheet phải
+// chạy ngay (không debounce dài) và được track để loadFromSheet biết cần chờ.
+// Vẫn giữ debounce ngắn (300ms) để gộp nhiều lượt tick liên tiếp thành 1 request,
+// nhưng không debounce dài 800ms như trước (quá đủ thời gian để user bấm quay lại).
 function scheduleFlush(cls, pk) {
   if (!isSyncEnabled()) return;
   clearTimeout(flushTimer);
-  flushTimer = setTimeout(() => flushToSheet(cls, pk), 800);
+  flushTimer = setTimeout(() => trackFlush(flushToSheet(cls, pk)), 300);
 }
 async function flushToSheet(cls, pk) {
   if (!isSyncEnabled()) return;
@@ -1098,11 +1125,12 @@ async function flushToSheet(cls, pk) {
   }
 }
 
+
 // ===== SYNC: gửi danh sách lớp/học sinh lên Sheet =====
 function scheduleDirectoryFlush() {
   if (!isSyncEnabled()) return;
   clearTimeout(dirFlushTimer);
-  dirFlushTimer = setTimeout(flushDirectoryToSheet, 800);
+  dirFlushTimer = setTimeout(() => trackFlush(flushDirectoryToSheet()), 300);
 }
 async function flushDirectoryToSheet() {
   if (!isSyncEnabled()) return;
@@ -1128,20 +1156,22 @@ async function flushDirectoryToSheet() {
 // ===== SYNC: xoá lớp trên Sheet =====
 async function deleteClassOnSheet(className) {
   if (!isSyncEnabled()) return;
-  try {
-    updateSyncBadge('syncing');
-    const res = await fetch(SHEET_API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'deleteClass', className })
-    });
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
-    updateSyncBadge('ok');
-  } catch (err) {
-    console.error('Lỗi xoá lớp trên Sheet:', err);
-    updateSyncBadge('error');
-  }
+  return trackFlush((async () => {
+    try {
+      updateSyncBadge('syncing');
+      const res = await fetch(SHEET_API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action: 'deleteClass', className })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      updateSyncBadge('ok');
+    } catch (err) {
+      console.error('Lỗi xoá lớp trên Sheet:', err);
+      updateSyncBadge('error');
+    }
+  })());
 }
 
 // ===== MODAL =====
@@ -1157,6 +1187,16 @@ function showToast(msg) {
   t.classList.add('show');
   setTimeout(() => t.classList.remove('show'), 2800);
 }
+
+// ===== CẢNH BÁO KHI RỜI TRANG LÚC CHƯA LƯU XONG =====
+// Nếu vẫn còn request đang gửi lên Sheet (chưa kịp lưu), cảnh báo trước khi
+// đóng tab/refresh để tránh tưởng đã lưu nhưng thực ra request bị hủy giữa đường.
+window.addEventListener('beforeunload', e => {
+  if (pendingFlushPromises.length > 0) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
 
 // ===== KEYBOARD =====
 document.addEventListener('keydown', e => {
