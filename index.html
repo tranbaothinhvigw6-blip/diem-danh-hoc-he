@@ -455,6 +455,9 @@ tfoot td.fee-cell { color: var(--accent3); padding-right: 18px; }
       <label>NĂM
         <input type="number" id="selYear" value="2026" min="2020" max="2100" onchange="rebuild()" style="width:80px">
       </label>
+      <label style="justify-content:flex-end">&nbsp;
+        <button class="btn btn-outline btn-sm" onclick="loadFromSheet(true)">🔄 Đồng bộ lại</button>
+      </label>
     </div>
   </div>
   <div class="classes-grid" id="classesGrid"></div>
@@ -467,6 +470,7 @@ tfoot td.fee-cell { color: var(--accent3); padding-right: 18px; }
     <div class="detail-title" id="detailTitle"></div>
     <div class="detail-schedule-badge" id="detailScheduleBadge"></div>
     <div class="detail-actions">
+      <button class="btn btn-outline btn-sm" onclick="loadFromSheet(true)">🔄 Đồng bộ lại</button>
       <button class="btn btn-outline btn-sm" onclick="openStudentsModal()">👥 Học sinh</button>
       <button class="btn btn-accent btn-sm" onclick="exportExcel()">⬇ Excel</button>
     </div>
@@ -757,7 +761,7 @@ function renderDashboard() {
 }
 
 // ===== OPEN CLASS =====
-function openClass(name) {
+async function openClass(name) {
   state.activeClass = name;
   rebuildDays();
   const col = getClassColor(name);
@@ -771,6 +775,9 @@ function openClass(name) {
   document.getElementById('detailView').style.display = 'block';
   updateSyncBadge();
   renderTable();
+  // Tải lại dữ liệu mới nhất từ Sheet (Sheet là nguồn chính) cho riêng lớp này
+  await loadFromSheet();
+  if (state.activeClass === name) renderTable();
 }
 function goBack() {
   state.activeClass = null;
@@ -1019,41 +1026,43 @@ function updateSyncBadge(status) {
 }
 
 // ===== SYNC: tải dữ liệu từ Sheet khi mở trang =====
-async function loadFromSheet() {
+// Google Sheet là NGUỒN CHÍNH (source of truth). Mỗi lần gọi, dữ liệu từ Sheet
+// sẽ ghi đè lên local/localStorage để mọi máy đều thấy data mới nhất.
+async function loadFromSheet(showSpinnerToast) {
   if (!isSyncEnabled()) return;
   try {
     updateSyncBadge('syncing');
+    if (showSpinnerToast) showToast('🔄 Đang tải dữ liệu từ Google Sheet...');
     const res = await fetch(`${SHEET_API_URL}?action=getAll`);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
 
-    // Chỉ áp dụng dữ liệu từ Sheet nếu local chưa có gì (tránh đè mất dữ liệu đang sửa)
-    const hasLocalClasses = Object.keys(state.classes).length > 0;
     if (data.classes && Object.keys(data.classes).length > 0) {
-      if (!hasLocalClasses) {
-        state.classes = data.classes;
-        Object.keys(state.classes).forEach(n => {
-          if (!state.classesMeta[n]) state.classesMeta[n] = { days: [1,3,5], time: '' };
-        });
-      }
-    }
-    if (data.attendance) {
-      // merge: dữ liệu Sheet là nguồn "đã lưu", merge vào local nếu local chưa có period đó
-      Object.keys(data.attendance).forEach(cls => {
-        if (!state.attendance[cls]) state.attendance[cls] = {};
-        Object.keys(data.attendance[cls]).forEach(pk => {
-          if (!state.attendance[cls][pk]) {
-            state.attendance[cls][pk] = data.attendance[cls][pk];
-          }
-        });
+      // Sheet thắng tuyệt đối cho danh sách lớp + học sinh
+      const newClasses = data.classes;
+      const newMeta = {};
+      Object.keys(newClasses).forEach(n => {
+        // Giữ lại lịch học (days/time) cũ nếu đã cấu hình, vì Sheet không lưu info này
+        newMeta[n] = state.classesMeta[n] || { days: [1,3,5], time: '' };
       });
+      state.classes = newClasses;
+      state.classesMeta = newMeta;
     }
+
+    if (data.attendance) {
+      // Sheet thắng tuyệt đối cho điểm danh: ghi đè toàn bộ
+      state.attendance = data.attendance;
+    }
+
     saveState();
     rebuild();
+    if (state.activeClass) renderTable();
     updateSyncBadge('ok');
+    if (showSpinnerToast) showToast('✅ Đã đồng bộ dữ liệu mới nhất!');
   } catch (err) {
     console.error('Lỗi tải dữ liệu từ Sheet:', err);
     updateSyncBadge('error');
+    if (showSpinnerToast) showToast('🔴 Lỗi đồng bộ, kiểm tra kết nối mạng');
   }
 }
 
