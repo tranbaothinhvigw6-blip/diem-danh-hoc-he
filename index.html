@@ -396,6 +396,7 @@ function renderTable() {
     <div class="info-chip">👥 <strong>${students.length} học sinh</strong></div>
     <div class="info-chip">💰 Học phí: <strong>${gia.toLocaleString('vi-VN')}đ</strong>/buổi</div>
     <button class="btn btn-outline btn-sm" style="margin-left:auto" onclick="openStudentsModal()">✏️ Quản lý học sinh</button>
+    <button class="btn btn-danger btn-sm" onclick="resetClassAttendance()">♻️ Xoá điểm danh lớp này</button>
     <button class="btn btn-danger btn-sm" onclick="deleteClass()">🗑 Xoá lớp</button>
   `;
 
@@ -476,6 +477,14 @@ function addClass() {
   renderTable();
   showToast(`✅ Đã thêm lớp "${name}"`);
 }
+function resetClassAttendance() {
+  const cls = state.activeClass;
+  if (!confirm(`Xoá toàn bộ dữ liệu điểm danh của lớp "${cls}"?\nDanh sách học sinh vẫn được giữ nguyên.`)) return;
+  delete state.attendance[cls];
+  saveState();
+  renderTable();
+  showToast(`✅ Đã xoá dữ liệu điểm danh lớp "${cls}"`);
+} 
 function deleteClass() {
   const cls = state.activeClass;
   if (Object.keys(state.classes).length <= 1) { showToast('Phải có ít nhất 1 lớp!'); return; }
