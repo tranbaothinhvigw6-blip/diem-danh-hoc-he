@@ -271,6 +271,7 @@ body {
 .sync-badge.ok { background: rgba(67,233,123,0.15); color: #43e97b; }
 .sync-badge.off { background: rgba(255,255,255,0.05); color: var(--muted); }
 .sync-badge.error { background: rgba(255,101,132,0.15); color: var(--accent2); }
+.sync-badge.syncing { background: rgba(247,151,30,0.15); color: var(--accent4); }
 
 .detail-main { padding: 24px 28px; }
 .detail-info {
@@ -545,10 +546,10 @@ const CARD_COLORS = [
 
 // Cấu trúc lớp: name, days (số nguyên: 0=CN,1=T2..6=T7), time
 const DEFAULT_CLASSES_META = [
-  { name: "Lớp 1A", days: [1,3,5], time: "",        students: ["Thịnh","Từ Minh Quân","Khánh Ngân","Thiên Khôi","Tiger (Minh Trí)","Thiên Thư","Minh Triết","Thiên Trí","Khánh Linh","Hoàng Phúc","Lệ Quyên","Thiên Quang","Anh Thư"] },
+  { name: "Lớp 1A", days: [1,3,5], time: "",        students: ["Thịnh","Từ Minh Quân","Thiên Khôi","Tiger (Minh Trí)","Thiên Thư","Minh Triết","Thiên Trí","Khánh Linh","Thiên Quang"] },
   { name: "Lớp 1",  days: [2,4,6], time: "9h-11h",  students: [] },
   { name: "Lớp 2",  days: [2,4,6], time: "",         students: [] },
-  { name: "Lớp 3",  days: [1,3,5], time: "",         students: ["Hoàng Khang","Thanh Hà","YSENNY","Jenny","Bảo Trâm","Thiên Kỳ","Quỳnh Như","Triều Phong","Thúy Kiều","Yến My"] },
+  { name: "Lớp 3",  days: [1,3,5], time: "",         students: ["Hoàng Khang","Thanh Hà","YSENNY","Jenny","Thiên Kỳ","Quỳnh Như","Triều Phong","Thúy Kiều","Yến My"] },
   { name: "Lớp 4",  days: [2,3,4], time: "",         students: [] },
 ];
 
@@ -562,6 +563,7 @@ let state = {
 };
 let lastLocalEditAt = 0;
 let flushTimer = null;
+let dirFlushTimer = null;
 
 // ===== PERSIST =====
 function loadState() {
@@ -767,6 +769,7 @@ function openClass(name) {
   document.getElementById('detailScheduleBadge').style.color = col.accent;
   document.getElementById('dashView').style.display = 'none';
   document.getElementById('detailView').style.display = 'block';
+  updateSyncBadge();
   renderTable();
 }
 function goBack() {
@@ -881,6 +884,7 @@ function addClass() {
   closeModal('modalClass');
   saveState();
   rebuild();
+  scheduleDirectoryFlush();
   showToast(`✅ Đã thêm lớp "${name}"`);
 }
 
@@ -892,6 +896,8 @@ function confirmDeleteClass(name) {
   delete state.attendance[name];
   saveState();
   renderDashboard();
+  scheduleDirectoryFlush();
+  deleteClassOnSheet(name);
   showToast(`🗑 Đã xoá lớp "${name}"`);
 }
 
@@ -901,6 +907,7 @@ function resetClassAttendance() {
   delete state.attendance[cls];
   saveState();
   renderTable();
+  scheduleFlush(cls, getPeriodKey());
   showToast(`✅ Đã xoá điểm danh lớp "${cls}"`);
 }
 
@@ -935,6 +942,7 @@ function addStudent() {
   saveState();
   renderStudentList();
   renderTable();
+  scheduleDirectoryFlush();
 }
 function removeStudent(idx) {
   const cls = state.activeClass;
@@ -949,6 +957,7 @@ function removeStudent(idx) {
   saveState();
   renderStudentList();
   renderTable();
+  scheduleDirectoryFlush();
 }
 
 // ===== EXPORT EXCEL =====
@@ -984,14 +993,146 @@ function exportExcel() {
   showToast('✅ Đã xuất Excel!');
 }
 
-// ===== SYNC =====
+// ===== SYNC: helpers chung =====
+function isSyncEnabled() {
+  return !!(SHEET_API_URL && SHEET_API_URL.trim());
+}
+function updateSyncBadge(status) {
+  // status: undefined (idle dựa theo config) | 'syncing' | 'ok' | 'error'
+  const el = document.getElementById('syncStatus');
+  if (!el) return;
+  if (!isSyncEnabled()) {
+    el.className = 'sync-badge off';
+    el.textContent = '⚪ Chưa cấu hình đồng bộ';
+    return;
+  }
+  if (status === 'syncing') {
+    el.className = 'sync-badge syncing';
+    el.textContent = '🟡 Đang đồng bộ...';
+  } else if (status === 'error') {
+    el.className = 'sync-badge error';
+    el.textContent = '🔴 Lỗi đồng bộ';
+  } else {
+    el.className = 'sync-badge ok';
+    el.textContent = '🟢 Đã đồng bộ Google Sheet';
+  }
+}
+
+// ===== SYNC: tải dữ liệu từ Sheet khi mở trang =====
+async function loadFromSheet() {
+  if (!isSyncEnabled()) return;
+  try {
+    updateSyncBadge('syncing');
+    const res = await fetch(`${SHEET_API_URL}?action=getAll`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+
+    // Chỉ áp dụng dữ liệu từ Sheet nếu local chưa có gì (tránh đè mất dữ liệu đang sửa)
+    const hasLocalClasses = Object.keys(state.classes).length > 0;
+    if (data.classes && Object.keys(data.classes).length > 0) {
+      if (!hasLocalClasses) {
+        state.classes = data.classes;
+        Object.keys(state.classes).forEach(n => {
+          if (!state.classesMeta[n]) state.classesMeta[n] = { days: [1,3,5], time: '' };
+        });
+      }
+    }
+    if (data.attendance) {
+      // merge: dữ liệu Sheet là nguồn "đã lưu", merge vào local nếu local chưa có period đó
+      Object.keys(data.attendance).forEach(cls => {
+        if (!state.attendance[cls]) state.attendance[cls] = {};
+        Object.keys(data.attendance[cls]).forEach(pk => {
+          if (!state.attendance[cls][pk]) {
+            state.attendance[cls][pk] = data.attendance[cls][pk];
+          }
+        });
+      });
+    }
+    saveState();
+    rebuild();
+    updateSyncBadge('ok');
+  } catch (err) {
+    console.error('Lỗi tải dữ liệu từ Sheet:', err);
+    updateSyncBadge('error');
+  }
+}
+
+// ===== SYNC: gửi điểm danh của 1 lớp/kỳ lên Sheet =====
 function scheduleFlush(cls, pk) {
-  if (!SHEET_API_URL) return;
+  if (!isSyncEnabled()) return;
   clearTimeout(flushTimer);
   flushTimer = setTimeout(() => flushToSheet(cls, pk), 800);
 }
 async function flushToSheet(cls, pk) {
-  // same implementation as before if SHEET_API_URL is set
+  if (!isSyncEnabled()) return;
+  try {
+    updateSyncBadge('syncing');
+    const [year, month] = pk.split('-').map(Number);
+    const { header, rows } = buildPeriodRows(cls, year, month);
+    const res = await fetch(SHEET_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'saveClassPeriod',
+        className: cls,
+        periodKey: pk,
+        headerRow: header,
+        rows: rows
+      })
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    updateSyncBadge('ok');
+  } catch (err) {
+    console.error('Lỗi đồng bộ điểm danh:', err);
+    updateSyncBadge('error');
+  }
+}
+
+// ===== SYNC: gửi danh sách lớp/học sinh lên Sheet =====
+function scheduleDirectoryFlush() {
+  if (!isSyncEnabled()) return;
+  clearTimeout(dirFlushTimer);
+  dirFlushTimer = setTimeout(flushDirectoryToSheet, 800);
+}
+async function flushDirectoryToSheet() {
+  if (!isSyncEnabled()) return;
+  try {
+    updateSyncBadge('syncing');
+    const res = await fetch(SHEET_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'saveDirectory',
+        classes: state.classes
+      })
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    updateSyncBadge('ok');
+  } catch (err) {
+    console.error('Lỗi đồng bộ danh sách lớp:', err);
+    updateSyncBadge('error');
+  }
+}
+
+// ===== SYNC: xoá lớp trên Sheet =====
+async function deleteClassOnSheet(className) {
+  if (!isSyncEnabled()) return;
+  try {
+    updateSyncBadge('syncing');
+    const res = await fetch(SHEET_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'deleteClass', className })
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    updateSyncBadge('ok');
+  } catch (err) {
+    console.error('Lỗi xoá lớp trên Sheet:', err);
+    updateSyncBadge('error');
+  }
 }
 
 // ===== MODAL =====
@@ -1021,6 +1162,7 @@ document.addEventListener('keydown', e => {
 // ===== INIT =====
 loadState();
 rebuild();
+loadFromSheet();
 </script>
 </body>
 </html>
