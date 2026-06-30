@@ -452,13 +452,13 @@ tfoot td.fee-cell { color: var(--accent3); padding-right: 18px; }
           <option value="1">Tháng 1</option><option value="2">Tháng 2</option>
           <option value="3">Tháng 3</option><option value="4">Tháng 4</option>
           <option value="5">Tháng 5</option><option value="6">Tháng 6</option>
-          <option value="7" selected>Tháng 7</option><option value="8">Tháng 8</option>
+          <option value="7">Tháng 7</option><option value="8">Tháng 8</option>
           <option value="9">Tháng 9</option><option value="10">Tháng 10</option>
           <option value="11">Tháng 11</option><option value="12">Tháng 12</option>
         </select>
       </label>
       <label>NĂM
-        <input type="number" id="selYear" value="2026" min="2020" max="2100" onchange="rebuild()" style="width:80px">
+        <input type="number" id="selYear" min="2020" max="2100" onchange="rebuild()" style="width:80px">
       </label>
       <label style="justify-content:flex-end">&nbsp;
         <button class="btn btn-outline btn-sm" onclick="loadFromSheet(true)">🔄 Đồng bộ lại</button>
@@ -837,7 +837,22 @@ function renderTable() {
 
 // ===== MARK ALL TODAY =====
 function markAllToday() {
+  // Luôn đồng bộ dropdown tháng/năm về đúng tháng/năm hiện tại trước khi kiểm tra,
+  // để tránh trường hợp dropdown đang ở 1 tháng khác (vd: do người dùng đổi trước đó)
+  // khiến hôm nay bị thiếu trong state.days dù thực tế hôm nay có lịch học.
   const today = new Date();
+  const todayMonth = today.getMonth() + 1;
+  const todayYear = today.getFullYear();
+
+  const selMonth = parseInt(document.getElementById('selMonth').value);
+  const selYear  = parseInt(document.getElementById('selYear').value);
+
+  if (selMonth !== todayMonth || selYear !== todayYear) {
+    document.getElementById('selMonth').value = todayMonth;
+    document.getElementById('selYear').value = todayYear;
+    rebuildDays();
+  }
+
   const dk = fmtKey(today);
   const found = state.days.find(d => fmtKey(d) === dk);
   if (!found) { showToast('Hôm nay không có buổi học'); return; }
@@ -987,25 +1002,6 @@ function exportExcel() {
 // ===================================================================
 // ===== SYNC – SERIAL QUEUE PER (CLASS, PERIOD) ======================
 // ===================================================================
-//
-// Vấn đề cũ: nhiều lượt tick nhanh → debounce cancel lẫn nhau nhưng
-// đôi khi vẫn để 2 fetch của cùng (cls, pk) bay song song → race condition.
-//
-// Giải pháp: mỗi cặp (cls, pk) có 1 hàng đợi riêng gồm 2 phần:
-//   - debounceTimer : gộp các lượt thay đổi liên tiếp thành 1 lần gửi
-//   - running       : promise của request đang chạy (nếu có)
-//   - pending       : true/false — có yêu cầu gửi đang chờ running xong không
-//
-// Cơ chế:
-//  1. scheduleFlush(cls,pk) set debounceTimer 300 ms.
-//  2. Khi timer cháy → enqueueFlush(cls,pk).
-//  3. enqueueFlush: nếu đang chạy → chỉ đánh dấu pending=true rồi thoát.
-//     Khi running xong → tự kiểm tra pending, nếu còn → gửi tiếp 1 lần nữa.
-//  4. Kết quả: không bao giờ có 2 fetch của cùng (cls,pk) song song;
-//     dữ liệu mới nhất luôn được gửi sau khi request trước hoàn tất.
-// ===================================================================
-
-// Map<string, { debounceTimer, running: Promise|null, pending: bool }>
 const _queues = new Map();
 
 function _getQueue(key) {
@@ -1015,7 +1011,6 @@ function _getQueue(key) {
   return _queues.get(key);
 }
 
-/** Debounce 300ms rồi đưa vào hàng đợi tuần tự. */
 function scheduleFlush(cls, pk) {
   if (!isSyncEnabled()) return;
   const q = _getQueue(`${cls}||${pk}`);
@@ -1023,19 +1018,16 @@ function scheduleFlush(cls, pk) {
   q.debounceTimer = setTimeout(() => enqueueFlush(cls, pk), 300);
 }
 
-/** Đưa 1 lượt flush vào hàng đợi; không chạy song song cùng (cls, pk). */
 function enqueueFlush(cls, pk) {
   if (!isSyncEnabled()) return;
   const key = `${cls}||${pk}`;
   const q = _getQueue(key);
 
   if (q.running) {
-    // Đã có request đang chạy → chỉ đánh dấu "cần gửi thêm lần nữa"
     q.pending = true;
     return;
   }
 
-  // Không có gì đang chạy → bắt đầu ngay
   _startFlush(cls, pk);
 }
 
@@ -1046,7 +1038,7 @@ function _startFlush(cls, pk) {
 
   const promise = flushToSheet(cls, pk).then(
     () => _onFlushDone(cls, pk),
-    () => _onFlushDone(cls, pk)   // lỗi cũng giải phóng queue
+    () => _onFlushDone(cls, pk)
   );
   q.running = promise;
   trackFlush(promise);
@@ -1057,14 +1049,9 @@ function _onFlushDone(cls, pk) {
   const q = _getQueue(key);
   q.running = null;
   if (q.pending) {
-    // Trong khi đang gửi có thêm thay đổi → gửi lại 1 lần nữa
     _startFlush(cls, pk);
   }
 }
-
-// ===================================================================
-// ===== SYNC – CÁC HÀM GỐC (không đổi logic) =======================
-// ===================================================================
 
 function isSyncEnabled() {
   return !!(SHEET_API_URL && SHEET_API_URL.trim());
@@ -1274,6 +1261,13 @@ document.addEventListener('keydown', e => {
 });
 
 // ===== INIT =====
+// Set dropdown tháng/năm về đúng THÁNG/NĂM HIỆN TẠI (thay vì hard-code Tháng 7)
+(function initCurrentPeriod() {
+  const now = new Date();
+  document.getElementById('selMonth').value = now.getMonth() + 1;
+  document.getElementById('selYear').value = now.getFullYear();
+})();
+
 loadState();
 rebuild();
 loadFromSheet();
